@@ -3,7 +3,9 @@ set -eu
 
 APP_LABEL="Codex Linux Wayland Stable"
 ELECTRON_VERSION="40.0.0"
+ELECTRON_REBUILD_VERSION="3.6.0"
 DEFAULT_DMG_URL="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+CODEX_CLI_NPM_SPEC="${CODEX_CLI_NPM_SPEC:-@openai/codex}"
 
 CODEX_INSTALL_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/share/codex-linux-wayland-stable}"
 TOOLS_DIR="$CODEX_INSTALL_DIR/.tools"
@@ -15,6 +17,7 @@ NODE_CMD=""
 NPM_CMD=""
 NPX_CMD=""
 SEVEN_ZIP=""
+ELECTRON_RESOLVED_VERSION="$ELECTRON_VERSION"
 
 say() {
   printf '%s\n' "$*"
@@ -43,6 +46,67 @@ die() {
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+sha256_of_file() {
+  FILE_PATH="$1"
+
+  if has_cmd sha256sum; then
+    sha256sum "$FILE_PATH" | awk '{print $1}'
+    return
+  fi
+
+  if has_cmd shasum; then
+    shasum -a 256 "$FILE_PATH" | awk '{print $1}'
+    return
+  fi
+
+  if has_cmd openssl; then
+    openssl dgst -sha256 "$FILE_PATH" | awk '{print $NF}'
+    return
+  fi
+
+  die "No SHA-256 tool found (need sha256sum, shasum, or openssl)"
+}
+
+normalize_sha256() {
+  printf '%s' "$1" | awk '{print $1}' | tr 'A-F' 'a-f'
+}
+
+verify_sha256() {
+  FILE_PATH="$1"
+  EXPECTED_INPUT="$2"
+  LABEL="$3"
+
+  EXPECTED_HASH="$(normalize_sha256 "$EXPECTED_INPUT")"
+  case "$EXPECTED_HASH" in
+    ''|*[!0-9a-f]*)
+      die "Invalid SHA-256 checksum for $LABEL"
+      ;;
+  esac
+
+  if [ "${#EXPECTED_HASH}" -ne 64 ]; then
+    die "Invalid SHA-256 checksum length for $LABEL"
+  fi
+
+  ACTUAL_HASH="$(sha256_of_file "$FILE_PATH" | tr 'A-F' 'a-f')"
+  if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+    die "Checksum mismatch for $LABEL (expected $EXPECTED_HASH got $ACTUAL_HASH)"
+  fi
+
+  ok "Checksum verified for $LABEL"
+}
+
+download_file() {
+  URL="$1"
+  DEST_PATH="$2"
+  MAX_TIME="$3"
+  LABEL="$4"
+
+  info "Downloading $LABEL"
+  curl -fL --progress-bar --retry 3 --retry-delay 2 --retry-connrefused \
+    --connect-timeout 30 --max-time "$MAX_TIME" -o "$DEST_PATH" "$URL"
+  [ -s "$DEST_PATH" ] || die "Downloaded $LABEL is empty"
 }
 
 cleanup() {
@@ -93,7 +157,7 @@ install_system_deps() {
   case "$PM" in
     pacman)
       info "Installing dependencies with pacman"
-      as_root "pacman -Sy --noconfirm --needed curl python p7zip base-devel tar xz"
+      as_root "pacman -S --noconfirm --needed curl python p7zip base-devel tar xz"
       ;;
     apt)
       info "Installing dependencies with apt"
@@ -194,14 +258,20 @@ setup_portable_node() {
   SHASUMS_URL="https://nodejs.org/dist/latest-v20.x/SHASUMS256.txt"
   info "Resolving latest Node.js v20 for linux-$NODE_ARCH"
 
-  NODE_TARBALL="$(curl -fsSL "$SHASUMS_URL" | grep "linux-$NODE_ARCH.tar.xz" | head -n 1 | awk '{print $2}')"
+  SHASUMS_PATH="$WORK_DIR/SHASUMS256.txt"
+  download_file "$SHASUMS_URL" "$SHASUMS_PATH" 120 "Node.js SHASUMS256.txt"
+
+  NODE_TARBALL="$(awk -v suffix="linux-$NODE_ARCH.tar.xz" '$2 ~ suffix"$" {print $2; exit}' "$SHASUMS_PATH")"
   [ -n "$NODE_TARBALL" ] || die "Failed to resolve Node.js tarball for linux-$NODE_ARCH"
+
+  NODE_SHA256="$(awk -v file="$NODE_TARBALL" '$2 == file {print $1; exit}' "$SHASUMS_PATH")"
+  [ -n "$NODE_SHA256" ] || die "Failed to resolve SHA-256 for $NODE_TARBALL"
 
   NODE_URL="https://nodejs.org/dist/latest-v20.x/$NODE_TARBALL"
   TMP_NODE_ARCHIVE="$WORK_DIR/$NODE_TARBALL"
 
-  info "Downloading portable Node.js ($NODE_TARBALL)"
-  curl -fsSL "$NODE_URL" -o "$TMP_NODE_ARCHIVE"
+  download_file "$NODE_URL" "$TMP_NODE_ARCHIVE" 1200 "portable Node.js ($NODE_TARBALL)"
+  verify_sha256 "$TMP_NODE_ARCHIVE" "$NODE_SHA256" "$NODE_TARBALL"
 
   rm -rf "$TOOLS_DIR/node"
   tar -xJf "$TMP_NODE_ARCHIVE" -C "$TOOLS_DIR"
@@ -222,6 +292,30 @@ setup_portable_node() {
   ok "Using portable Node.js at $NODE_CMD"
 }
 
+verify_dmg_checksum() {
+  DMG_PATH="$1"
+
+  if [ -n "${CODEX_DMG_SHA256:-}" ]; then
+    verify_sha256 "$DMG_PATH" "${CODEX_DMG_SHA256}" "Codex.dmg"
+    return
+  fi
+
+  if [ -n "${CODEX_DMG_SHA256_URL:-}" ]; then
+    SUMS_PATH="$WORK_DIR/Codex.dmg.sha256"
+    download_file "${CODEX_DMG_SHA256_URL}" "$SUMS_PATH" 120 "Codex.dmg checksum file"
+    EXPECTED_DMG_SHA256="$(awk 'NF {print $1; exit}' "$SUMS_PATH")"
+    [ -n "$EXPECTED_DMG_SHA256" ] || die "Could not parse checksum from CODEX_DMG_SHA256_URL"
+    verify_sha256 "$DMG_PATH" "$EXPECTED_DMG_SHA256" "Codex.dmg"
+    return
+  fi
+
+  if [ "${CODEX_REQUIRE_DMG_SHA256:-0}" = "1" ]; then
+    die "CODEX_REQUIRE_DMG_SHA256=1 but no checksum was provided"
+  fi
+
+  warn "Skipping Codex.dmg checksum verification (set CODEX_DMG_SHA256 or CODEX_DMG_SHA256_URL)."
+}
+
 setup_node() {
   if use_system_node_if_valid; then
     ok "Using system Node.js: $($NODE_CMD -v)"
@@ -234,17 +328,25 @@ setup_node() {
 
 resolve_dmg() {
   if [ -n "${CODEX_DMG_PATH:-}" ] && [ -f "${CODEX_DMG_PATH}" ]; then
-    say "${CODEX_DMG_PATH}"
+    DMG_PATH="${CODEX_DMG_PATH}"
+    verify_dmg_checksum "$DMG_PATH"
+    say "${DMG_PATH}"
     return
   fi
 
   DMG_PATH="$WORK_DIR/Codex.dmg"
   DMG_URL="${CODEX_DMG_URL:-$DEFAULT_DMG_URL}"
 
-  info "Downloading Codex.dmg"
-  curl -L --progress-bar --connect-timeout 30 --max-time 1200 -o "$DMG_PATH" "$DMG_URL"
+  if [ "${CODEX_REQUIRE_DMG_SHA256:-0}" = "1" ] && [ -z "${CODEX_DMG_SHA256:-}" ] && [ -z "${CODEX_DMG_SHA256_URL:-}" ]; then
+    die "CODEX_REQUIRE_DMG_SHA256=1 but no checksum was provided"
+  fi
 
-  [ -s "$DMG_PATH" ] || die "Downloaded DMG is empty"
+  if [ "$DMG_URL" != "$DEFAULT_DMG_URL" ] && [ -z "${CODEX_DMG_SHA256:-}" ] && [ -z "${CODEX_DMG_SHA256_URL:-}" ]; then
+    die "Custom CODEX_DMG_URL requires CODEX_DMG_SHA256 or CODEX_DMG_SHA256_URL"
+  fi
+
+  download_file "$DMG_URL" "$DMG_PATH" 1200 "Codex.dmg"
+  verify_dmg_checksum "$DMG_PATH"
   say "$DMG_PATH"
 }
 
@@ -296,6 +398,41 @@ try {
 NODE
 }
 
+detect_electron_version() {
+  APP_SRC_DIR="$1"
+  FALLBACK="$2"
+
+  "$NODE_CMD" - "$APP_SRC_DIR" "$FALLBACK" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const appSrcDir = process.argv[2];
+const fallback = process.argv[3];
+
+function readJsonIfExists(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+let version = fallback;
+const pkg = readJsonIfExists(path.join(appSrcDir, "package.json"));
+if (pkg) {
+  const candidate =
+    (pkg.devDependencies && pkg.devDependencies.electron) ||
+    (pkg.dependencies && pkg.dependencies.electron) ||
+    "";
+  const match = String(candidate).match(/[0-9]+\.[0-9]+\.[0-9]+/);
+  if (match) version = match[0];
+}
+
+process.stdout.write(String(version));
+NODE
+}
+
 prepare_project() {
   APP_SRC_DIR="$1"
 
@@ -320,8 +457,10 @@ prepare_project() {
 
   BS3_VERSION="$(detect_module_version "$APP_SRC_DIR" better-sqlite3 12.4.6)"
   NPTY_VERSION="$(detect_module_version "$APP_SRC_DIR" node-pty 1.1.0)"
+  ELECTRON_RESOLVED_VERSION="$(detect_electron_version "$APP_SRC_DIR" "$ELECTRON_VERSION")"
 
   info "Native versions: better-sqlite3@$BS3_VERSION node-pty@$NPTY_VERSION"
+  info "Electron version: $ELECTRON_RESOLVED_VERSION"
 
   cat > "$PROJECT_DIR/package.json" <<EOF_JSON
 {
@@ -335,18 +474,18 @@ prepare_project() {
   "dependencies": {
     "better-sqlite3": "$BS3_VERSION",
     "node-pty": "$NPTY_VERSION",
-    "immer": "^10.1.1",
-    "lodash": "^4.17.21",
-    "memoizee": "^0.4.15",
-    "mime-types": "^2.1.35",
-    "shell-env": "^4.0.1",
-    "shlex": "^3.0.0",
-    "smol-toml": "^1.5.2",
-    "zod": "^3.22.0"
+    "immer": "10.1.1",
+    "lodash": "4.17.21",
+    "memoizee": "0.4.15",
+    "mime-types": "2.1.35",
+    "shell-env": "4.0.1",
+    "shlex": "3.0.0",
+    "smol-toml": "1.5.2",
+    "zod": "3.22.0"
   },
   "devDependencies": {
-    "electron": "$ELECTRON_VERSION",
-    "@electron/rebuild": "^3.6.0"
+    "electron": "$ELECTRON_RESOLVED_VERSION",
+    "@electron/rebuild": "$ELECTRON_REBUILD_VERSION"
   }
 }
 EOF_JSON
@@ -356,13 +495,13 @@ install_node_modules() {
   info "Installing npm dependencies"
   (
     cd "$PROJECT_DIR"
-    "$NPM_CMD" install --no-audit --no-fund
+    "$NPM_CMD" install --no-audit --no-fund --save-exact
   )
 
-  info "Rebuilding native modules for Electron $ELECTRON_VERSION"
+  info "Rebuilding native modules for Electron $ELECTRON_RESOLVED_VERSION"
   (
     cd "$PROJECT_DIR"
-    "$NPX_CMD" --yes @electron/rebuild -v "$ELECTRON_VERSION" --force
+    "$NPX_CMD" --yes @electron/rebuild -v "$ELECTRON_RESOLVED_VERSION" --force
   )
 }
 
@@ -403,9 +542,9 @@ install_codex_cli() {
     return
   fi
 
-  info "Installing local Codex CLI"
+  info "Installing local Codex CLI ($CODEX_CLI_NPM_SPEC)"
   mkdir -p "$LOCAL_CLI_PREFIX"
-  "$NPM_CMD" install --prefix "$LOCAL_CLI_PREFIX" @openai/codex --no-audit --no-fund
+  "$NPM_CMD" install --prefix "$LOCAL_CLI_PREFIX" "$CODEX_CLI_NPM_SPEC" --no-audit --no-fund
 
   [ -x "$LOCAL_CLI_BIN" ] || die "Failed to install local Codex CLI"
   say "$LOCAL_CLI_BIN"
@@ -503,7 +642,11 @@ if [ "${CODEX_FORCE_OPAQUE_WINDOWS:-1}" = "1" ]; then
     ensure_opaque_windows
 fi
 
-ELECTRON_FLAGS=(--no-sandbox)
+ELECTRON_FLAGS=()
+
+if [ "${CODEX_DISABLE_SANDBOX:-0}" = "1" ]; then
+    ELECTRON_FLAGS+=(--no-sandbox)
+fi
 
 if [ -n "${CODEX_OZONE_PLATFORM:-}" ]; then
     ELECTRON_FLAGS+=(--ozone-platform="${CODEX_OZONE_PLATFORM}")

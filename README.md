@@ -1,6 +1,6 @@
 # Codex Linux Wayland Stable
 
-Also avalible on [kroq.dev/tools](https://kroq.dev/tools)
+Also available on [kroq.dev/tools](https://kroq.dev/tools)
 
 Unofficial Codex Linux installer tuned for better Wayland behavior.
 
@@ -13,6 +13,36 @@ curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
 ```
 
 This script handles dependency install (when possible), downloads `Codex.dmg`, builds the Linux wrapper, installs CLI if needed, and creates a desktop launcher.
+
+## Security and Pinning Options
+
+The installer now verifies portable Node.js downloads against upstream SHA-256 checksums.
+
+For `Codex.dmg`, you can enable checksum verification with:
+
+```bash
+CODEX_DMG_SHA256="<expected_sha256>" curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
+```
+
+or:
+
+```bash
+CODEX_DMG_SHA256_URL="https://example.com/Codex.dmg.sha256" curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
+```
+
+If you use a custom `CODEX_DMG_URL`, a checksum is required (`CODEX_DMG_SHA256` or `CODEX_DMG_SHA256_URL`).
+
+To require a checksum even for the default DMG URL:
+
+```bash
+CODEX_REQUIRE_DMG_SHA256=1 curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
+```
+
+To pin the local CLI install to a specific version:
+
+```bash
+CODEX_CLI_NPM_SPEC="@openai/codex@<version>" curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
+```
 
 ## High-Confidence Distro Support
 
@@ -38,4 +68,5 @@ Why confidence is high: the installer uses standard Linux tooling (`curl`, `pyth
 CODEX_USE_X11_ON_WAYLAND=1 codex-desktop
 CODEX_DISABLE_GPU=1 codex-desktop
 CODEX_OZONE_PLATFORM=wayland codex-desktop
+CODEX_DISABLE_SANDBOX=1 codex-desktop
 ```
