@@ -1,5 +1,7 @@
 # Codex Linux Wayland Stable
 
+Also avalible on [kroq.dev/tools](https://kroq.dev/tools)
+
 Unofficial Codex Linux installer tuned for better Wayland behavior.
 
 Created and tested on **CachyOS (Arch Linux)**.
