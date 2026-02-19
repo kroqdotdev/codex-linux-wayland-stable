@@ -1,0 +1,6 @@
+Codex.dmg
+codex-linux/
+codex_extracted/
+codex_app_src/
+*.log
+/tmp/codex-7z.log
