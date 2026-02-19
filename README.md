@@ -18,32 +18,6 @@ This script handles dependency install (when possible), downloads `Codex.dmg`, b
 
 The installer now verifies portable Node.js downloads against upstream SHA-256 checksums.
 
-For `Codex.dmg`, you can enable checksum verification with:
-
-```bash
-CODEX_DMG_SHA256="<expected_sha256>" curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
-```
-
-or:
-
-```bash
-CODEX_DMG_SHA256_URL="https://example.com/Codex.dmg.sha256" curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
-```
-
-If you use a custom `CODEX_DMG_URL`, a checksum is required (`CODEX_DMG_SHA256` or `CODEX_DMG_SHA256_URL`).
-
-To require a checksum even for the default DMG URL:
-
-```bash
-CODEX_REQUIRE_DMG_SHA256=1 curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
-```
-
-To pin the local CLI install to a specific version:
-
-```bash
-CODEX_CLI_NPM_SPEC="@openai/codex@<version>" curl -fsSL https://kroq.dev/tools/codex-for-linux.sh | sh
-```
-
 ## High-Confidence Distro Support
 
 High confidence this works on:
